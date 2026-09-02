@@ -1,0 +1,4 @@
+INPUT_DIR = C:\Users\YOU\Vltava_Labe_OsmAnd\input
+OUTPUT_DIR = C:\Users\YOU\Vltava_Labe_OsmAnd\output
+MIN_ZOOM = 10
+MAX_ZOOM = 18
