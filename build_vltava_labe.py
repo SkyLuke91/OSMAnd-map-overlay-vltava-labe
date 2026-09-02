@@ -48,8 +48,9 @@ except NameError:
     # exec() v QGIS Python Console nemá __file__ — použij aktuální adresář
     SCRIPT_DIR = Path.cwd()
 BASE_DIR = SCRIPT_DIR
-INPUT_DIR = BASE_DIR / "input"
-OUTPUT_DIR = BASE_DIR / "output"
+# Hardcoded paths pro QGIS exec()
+INPUT_DIR = Path(r"C:\Users\Lukas\Scripts\mapy_vltava_labe\input")
+OUTPUT_DIR = Path(r"C:\Users\Lukas\Scripts\mapy_vltava_labe\output")
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -72,7 +73,8 @@ os.environ["OGR_S57_OPTIONS"] = (
 
 try:
     from osgeo import ogr, gdal
-except Exception:
+    print("[VLTAVA-LABE] GDAL imports hotovy")
+except Exception as e:
     raise RuntimeError(
         "V tomto QGIS Python prostředí není dostupný osgeo/GDAL. "
         "Spusť skript v QGIS Python Console, ne v běžném Pythonu."
@@ -87,6 +89,7 @@ from qgis.core import (
     QgsRectangle,
     QgsMapSettings,
     QgsMapRendererParallelJob,
+    QgsMapRendererSequentialJob,
     QgsFeature,
     QgsGeometry,
     QgsPointXY,
@@ -106,6 +109,8 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QSize
 from qgis.PyQt.QtGui import QColor, QImage, QPainter, QFont
+
+print("[VLTAVA-LABE] Importy dokončeny, spouštím run()...")
 
 
 # ----------------------------------------------------------------------
@@ -131,6 +136,9 @@ def find_s57_cells():
             "Očekávám například:\n"
             f"  {INPUT_DIR}\\9D7VL047.000"
         )
+    log(f"Nalezené soubory v INPUT_DIR ({len(cells)}):")
+    for cell in cells:
+        log(f"  - {cell.name}")
     return cells
 
 
@@ -165,18 +173,54 @@ def write_layer_report(cells):
 # Names are standard S-57 object class acronyms. Script only loads layers
 # that actually exist in the supplied ENC cells.
 LAYER_GROUPS = {
-    "depth": ["DEPCNT", "SOUNDG"],
-    "buoys": ["BOYLAT", "BOYCAR", "BOYSAW", "BOYISD", "BOYSPP"],
-    "beacons": ["BCNISD", "BCNLAT", "BCNCAR", "BCNSAW", "BCNSPP", "DAYMAR"],
-    "lights": ["LIGHTS"],
+    # Depth & sounding (bottom layer)
+    "depth": ["DEPCNT", "SOUNDG", "DEPARE"],
+
+    # Fairways & navigation
     "fairway": ["FAIRWY"],
-    "anchor": ["ACHARE"],
-    "harbour": ["HRBPRT", "HRBARE"],
-    "moles": ["MORFAC"],
-    "obstacles": ["OBSTRN", "WRECKS"],
+    "navigation": ["ACHARE", "ACHBRT", "RESARE", "RESDMP"],
+
+    # Harbour & marine facilities
+    "harbour": ["HRBPRT", "HRBARE", "HRBFAC", "HRBBSN"],
+    "facilities": ["BERTHS", "TERMNL", "TRNBSN", "LKBSPT", "MORFAC", "SMCFAC"],
+
+    # Locks, dams & water control
+    "locks": ["GATCON", "DAMCON", "DYKCON", "LOKBSN", "SISTAT", "SISTAW"],
+
+    # Bridges & crossings
     "bridges": ["BRIDGE"],
-    "locks": ["GATCON", "SLCONS", "DAMCON"],
+    "crossings": ["FERYRT", "DRYDOC"],
+
+    # Water areas
+    "water": ["SEAARE"],
+
+    # Land & landmarks
+    "landmarks": ["TWRTPT", "PYLONS"],
+
+    # Obstacles & hazards
+    "obstacles": ["OBSTRN", "WRECKS", "CBLOHD"],
+
+    # Infrastructure
+    "infrastructure": ["RIVERS"],
+
+    # Built-up & construction
+    "construction": ["CTNARE", "FNCLNE"],
+
+    # Waterway systems
+    "systems": ["WTWAXS", "COMARE", "RDOCAL"],
+
+    # Special features
+    "features": ["BUNSTA"],
+
+    # Buoys & beacons (near top)
+    "beacons": ["BCNISD", "BCNLAT", "BCNCAR", "BCNSAW", "BCNSPP", "DAYMAR", "NOTMRK"],
+    "lights": ["LIGHTS"],
+
+    # Shoreline (just under buoys)
     "shore": ["COALNE", "LNDELV"],
+
+    # Buoys (top layer - rendered last)
+    "buoys": ["BOYLAT", "BOYCAR", "BOYSAW", "BOYISD", "BOYSPP"],
 }
 
 ALL_WANTED = [x for group in LAYER_GROUPS.values() for x in group]
@@ -303,6 +347,12 @@ def style_layer(layer, lname):
     elif n == "COALNE":
         set_simple_line(layer, 0.8, 130)
 
+    elif n == "DEPARE":
+        set_simple_fill(layer, (20, 110, 210, 40), (20, 90, 190, 160), 0.5)
+
+    elif n == "SEAARE":
+        set_simple_fill(layer, (20, 110, 210, 40), (20, 90, 190, 160), 0.5)
+
 
 # ----------------------------------------------------------------------
 # Web Mercator tile helpers
@@ -398,8 +448,12 @@ def init_osmand_db(path):
 
 def image_to_png_bytes(img):
     from qgis.PyQt.QtCore import QBuffer, QIODevice
+    # PyQt6 přesunul WriteOnly do OpenModeFlag; PyQt5 má WriteOnly přímo.
+    open_mode = getattr(QIODevice, "WriteOnly", None)
+    if open_mode is None:
+        open_mode = QIODevice.OpenModeFlag.WriteOnly
     buf = QBuffer()
-    buf.open(QIODevice.WriteOnly)
+    buf.open(open_mode)
     img.save(buf, "PNG")
     data = bytes(buf.data())
     buf.close()
@@ -412,17 +466,23 @@ def image_to_png_bytes(img):
 def render_tile(layers, x, y, z):
     settings = QgsMapSettings()
     settings.setLayers(layers)
+    settings.setTransformContext(QgsProject.instance().transformContext())
     settings.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
     settings.setExtent(tile_extent_3857(x, y, z))
     settings.setOutputSize(QSize(TILE_SIZE, TILE_SIZE))
-    settings.setOutputImageFormat(QImage.Format_ARGB32)
+    settings.setOutputImageFormat(QImage.Format.Format_ARGB32)
     settings.setBackgroundColor(QColor(255, 255, 255, 0))
     settings.setFlag(QgsMapSettings.Antialiasing, True)
 
-    job = QgsMapRendererParallelJob(settings)
+    # Sekvenční job je v QGIS konzoli spolehlivý; paralelní job vrací při
+    # rychlém volání v cyklu prázdné (plně průhledné) obrázky.
+    job = QgsMapRendererSequentialJob(settings)
     job.start()
     job.waitForFinished()
     img = job.renderedImage()
+    # Pojistka: parallel/sequential job může vrátit obrázek jiného formátu.
+    if img.format() != QImage.Format.Format_ARGB32:
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
     return img
 
 
@@ -438,9 +498,11 @@ def is_blank(img):
 
 
 def transform_project_extent_to_4326(layers):
+    # POZOR: layer.extent() je v CRS vrstvy (S-57 buňky jsou EPSG:4326),
+    # ne v EPSG:3857. Dřívější verze transformovala stupně jako by byly
+    # metry 3857 → výsledný rozsah se srovnal k (0,0) a všechny dlaždice
+    # se renderovaly nad prázdným oceánem u pobřeží Afriky.
     crs4326 = QgsCoordinateReferenceSystem("EPSG:4326")
-    crs3857 = QgsCoordinateReferenceSystem("EPSG:3857")
-    tr = QgsCoordinateTransform(crs3857, crs4326, QgsProject.instance())
 
     total = None
     for layer in layers:
@@ -450,6 +512,7 @@ def transform_project_extent_to_4326(layers):
         if e.isEmpty():
             continue
         try:
+            tr = QgsCoordinateTransform(layer.crs(), crs4326, QgsProject.instance())
             e4326 = tr.transformBoundingBox(e)
         except Exception:
             continue
@@ -464,7 +527,11 @@ def transform_project_extent_to_4326(layers):
 # Main
 # ----------------------------------------------------------------------
 def run():
-    log(f"Script: {Path(__file__).resolve()}")
+    try:
+        script_path = Path(__file__).resolve()
+    except NameError:
+        script_path = Path.cwd() / "build_vltava_labe.py"
+    log(f"Script: {script_path}")
     log(f"INPUT_DIR:  {INPUT_DIR}")
     log(f"OUTPUT_DIR: {OUTPUT_DIR}")
 
@@ -479,27 +546,39 @@ def run():
     loaded = []
     seen = set()
 
-    # Discover available layer names first.
+    # Discover available layer names first. GDAL vrací názvy vrstev v různé
+    # velikosti písmen (někdy "RESARE", jindy "resare"), proto se porovnává
+    # case-insensitive a dál se používá skutečný název pro URI.
     available = {}
     for cell in cells:
-        names = set(ogr_layers(cell))
+        names = {n.upper(): n for n in ogr_layers(cell)}
         available[cell] = names
 
     # Load only requested layers which actually exist.
     for cell in cells:
         for lname in ALL_WANTED:
-            if lname not in available[cell]:
+            actual = available[cell].get(lname.upper())
+            if actual is None:
                 continue
 
-            key = (str(cell), lname)
+            # Skip SEAARE if DEPARE exists in the same cell (avoid duplicate coverage)
+            if lname.upper() == "SEAARE" and "DEPARE" in available[cell]:
+                continue
+
+            key = (str(cell), lname.upper())
             if key in seen:
                 continue
             seen.add(key)
 
-            log(f"Načítám {cell.name} / {lname}")
-            layer = load_qgis_layer(cell, lname)
+            log(f"Načítám {cell.name} / {actual}")
+            layer = load_qgis_layer(cell, actual)
             if layer is None:
-                log(f"  WARNING: QGIS layer se nepodařilo načíst: {lname}")
+                log(f"  WARNING: QGIS layer se nepodařilo načít: {lname}")
+                continue
+
+            # Check if layer contains any data
+            if layer.featureCount() == 0:
+                log(f"  Vrstva je prázdná (0 features), přeskakuji: {lname}")
                 continue
 
             style_layer(layer, lname)
@@ -534,6 +613,45 @@ def run():
     con = init_osmand_db(OUT_SQLITE)
     cur = con.cursor()
 
+    # --- Diagnostika: jeden testovací tile + parametry vrstev -------------
+    _diag = []
+    _c = extent4326.center()
+    _tx, _ty = lonlat_to_tile(_c.x(), _c.y(), 12)
+    _img = render_tile(loaded, _tx, _ty, 12)
+    _p = OUTPUT_DIR / "debug_tile.png"
+    _img.save(str(_p), "PNG")
+    _diag.append(
+        f"test tile z=12 x={_tx} y={_ty} blank={is_blank(_img)} "
+        f"format={_img.format()} -> {_p}"
+    )
+    for _i, _l in enumerate(loaded):
+        _diag.append(
+            f"{_l.name()}: valid={_l.isValid()} crs={_l.crs().authid()} "
+            f"feats={_l.featureCount()} extent={_l.extent().toString(4)} "
+            f"renderer={type(_l.renderer()).__name__} "
+            f"source={_l.source()}"
+        )
+        if _i < 3:
+            _f = next(_l.getFeatures(), None)
+            if _f is not None and _f.hasGeometry():
+                _g = _f.geometry()
+                _diag.append(
+                    f"  first feat: wkb={_g.constGet().geometryType()} "
+                    f"valid={_g.isGeosValid()} bbox={_g.boundingBox().toString(4)}"
+                )
+            # render tej vrstvy samotnej do vlastného PNG
+            _img1 = render_tile([_l], _tx, _ty, 12)
+            _p1 = OUTPUT_DIR / f"debug_layer_{_i}.png"
+            _img1.save(str(_p1), "PNG")
+            _diag.append(
+                f"  solo render blank={is_blank(_img1)} -> {_p1.name}"
+            )
+    (OUTPUT_DIR / "diag.txt").write_text(
+        "\n".join(_diag), encoding="utf-8"
+    )
+    for _line in _diag:
+        log("DIAG " + _line)
+
     inserted = 0
     rendered = 0
 
@@ -541,14 +659,26 @@ def run():
         for z in range(MIN_ZOOM, MAX_ZOOM + 1):
             xmin, xmax, ymin, ymax = qgs_extent_to_tile_range(extent4326, z)
             count = (xmax - xmin + 1) * (ymax - ymin + 1)
-            log(f"Zoom {z}: kandidátních dlaždic {count}")
+            log(f"Zoom {z}: kandidátních dlaždic {count} (x {xmin}-{xmax}, y {ymin}-{ymax})")
 
+            blanks = 0
             for x in range(xmin, xmax + 1):
                 for y in range(ymin, ymax + 1):
-                    img = render_tile(loaded, x, y, z)
+                    try:
+                        img = render_tile(loaded, x, y, z)
+                    except Exception as e:
+                        log(f"  CHYBA renderu z={z} x={x} y={y}: {e!r}")
+                        raise
                     rendered += 1
+                    if rendered <= 3 or rendered % 100 == 0:
+                        a = QColor.fromRgba(img.pixel(128, 128))
+                        log(
+                            f"  tile z={z} x={x} y={y} blank={is_blank(img)} "
+                            f"stred alpha={a.alpha()}"
+                        )
 
                     if is_blank(img):
+                        blanks += 1
                         continue
 
                     blob = image_to_png_bytes(img)
@@ -564,8 +694,10 @@ def run():
                     log(f"  z={z}: x={x}/{xmax}, uloženo {inserted}")
 
             con.commit()
+            log(f"Zoom {z} hotový: prázdných {blanks}, uloženo {inserted}")
 
     finally:
+        con.commit()
         con.close()
 
     log(f"Hotovo. Renderováno: {rendered}, uloženo: {inserted}")
@@ -573,9 +705,10 @@ def run():
     log("V OsmAndu přidej soubor jako rastrový Overlay.")
 
 
-if __name__ == "__main__":
-    try:
-        run()
-    except Exception:
-        traceback.print_exc()
-        raise
+# V QGIS Python Console přes exec() se __name__ rovná "__builtin__", ne "__main__"
+# Proto voláme run() přímo po importech
+try:
+    run()
+except Exception:
+    traceback.print_exc()
+    raise
