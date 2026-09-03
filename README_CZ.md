@@ -1,76 +1,89 @@
-# Vltava_Labe_OsmAnd – corrected
+# Vltava + Labe → OsmAnd (S-57/IENC raster overlay)
 
-Tato verze je určena pro spuštění v QGIS Python Console.
+Skript `build_vltava_labe.py` převádí české vnitrozemské S-57/IENC mapové buňky
+(řeky Vltava a Labe, soubory jako `9D7VL047.000`, `9D7EL726.000`) na
+průhledný rastrový overlay pro [OsmAnd](https://osmand.net/) — SQLite tile
+databázi (`Vltava_Labe.sqlitedb`).
 
-## Umístění
+> ⚠️ Výstup je vizualizační overlay. Nenahrazuje Inland ECDIS a neměl by být
+> používán jako jediný navigační prostředek.
 
-Doporučená struktura:
+[English version](README.md)
 
-C:\Users\Lukas\Downloads\mapy_vltava_labe\
-├── build_vltava_labe.py
-└── Vltava_Labe_OsmAnd\
-    ├── input\
-    │   ├── 9D7VL047.000
-    │   └── další *.000 / případné *.001, *.002...
-    └── output\
+## Požadavky
 
-Skript už nepoužívá Path.home(). Cesty určuje relativně k umístění samotného
-build_vltava_labe.py.
+- QGIS s podporou PyQGIS, Qt a GDAL S-57 driveru (testováno na Windows).
+- Skript **běží jen v QGIS Python Console** — samostatné Python/GDAL na tomto
+  stroji chybí.
 
-## Spuštění
+## Instalace
 
-V QGIS:
-1. Plugins -> Python Console
-2. spusť:
+```bash
+git clone https://github.com/SkyLuke91/mapy_vltava_labe.git
+```
 
-exec(open(r"C:\Users\Lukas\Downloads\mapy_vltava_labe\build_vltava_labe.py", encoding="utf-8").read())
+## Použití
 
-Výstup bude v:
+1. V QGIS otevřete **Plugins → Python Console**.
+2. Spusťte:
 
-C:\Users\Lukas\Downloads\mapy_vltava_labe\Vltava_Labe_OsmAnd\output\
+```python
+exec(open(r"C:\cesta\k\mapy_vltava_labe\build_vltava_labe.py", encoding="utf-8").read())
+```
 
-- Vltava_Labe.sqlitedb
-- Vltava_Labe_review.qgz
-- S57_layers_report.txt
+Výstup najdete v `output/`:
 
-## Co skript dělá
+- `Vltava_Labe.sqlitedb` — OsmAnd tile databáze
+- `Vltava_Labe_review.qgz` — QGIS projekt s načtenými S-57 vrstvami pro kontrolu
+- `S57_layers_report.txt` — seznam vrstev, které GDAL v každé buňce skutečně vidí
 
-Používá GDAL S-57 driver a nastavuje:
-- UPDATES=APPLY
-- SPLIT_MULTIPOINT=ON
-- ADD_SOUNDG_DEPTH=ON
+V OsmAnd pak soubor přidejte jako **rastrovou overlay mapu**
+(Mapy → Překryvová mapa / Overlay map).
 
-Tím získá jednotlivé hloubkové body SOUNDG s atributem DEPTH, pokud je
-příslušná informace v ENC datech.
+## Struktura
 
-Načítá dostupné vrstvy:
-DEPCNT, SOUNDG, BOYLAT, BOYCAR, BOYSAW, BOYISD, BOYSPP,
-BCNISD, BCNLAT, BCNCAR, BCNSAW, BCNSPP, DAYMAR, LIGHTS,
-FAIRWY, ACHARE, HRBPRT, HRBARE, MORFAC, OBSTRN, WRECKS,
-BRIDGE, GATCON, SLCONS, DAMCON, COALNE.
+```
+build_vltava_labe.py     # hlavní (jediný) skript
+input/                   # S-57 buňky *.000 (glob je nerekurzivní)
+input/later/             # archiv dalších buněk — build je IGNORUJE
+output/                  # výstup sqlitedb + qgz + report
+source of maps/          # původní zdrojové archivy (*.zip)
+```
 
-Pokud některá vrstva v konkrétní ENC buňce neexistuje, přeskočí ji.
+## Jak to funguje
 
-## Důležité
+1. `find_s57_cells()` najde `input/*.000` a zapíše layer report.
+2. Načte se přes OGR provider s `UPDATES=APPLY`, `SPLIT_MULTIPOINT=ON`,
+   `ADD_SOUNDG_DEPTH=ON` (bod SOUNDG dostane atribut `DEPTH`).
+3. Načtené vrstvy: DEPCNT, SOUNDG, bóje, majáky (BOY*/BCN*), LIGHTS, FAIRWY,
+   ACHARE, HRBPRT, MORFAC, OBSTRN, WRECKS, BRIDGE, GATCON, SLCONS, DAMCON,
+   COALNE a další. Chybějící vrstvy se přeskočí, nejsou chybou.
+4. Pro každý zoom 10–16 se vyrenderují průhledné 256px PNG dlaždice;
+   prázdné (`is_blank()`) se přeskočí, zbytek jde do SQLite.
+5. Každá vrstva dostane jednoduchý QGIS styl (hloubky, bóje, majáky, fairway…).
 
-Výchozí MAX_ZOOM = 16. To je záměrné. Zvyšování na 17 nebo 18 může
-dramaticky zvětšit počet dlaždic a dobu renderování.
+## Konfigurace
 
-Výstupní SQLite používá normální OsmAnd tile numbering:
-- ellipsoid = 0
-- inverted_y = 0
-- tilenumbering = ''
-- tilesize = 256
+Konstanty upravte přímo na začátku `build_vltava_labe.py`
+(`config_example.txt` skript nečte — pozůstatek starší verze):
 
-## Pokud skript skončí na GDAL/S-57 chybě
+- `INPUT_DIR` / `OUTPUT_DIR` — relativní k umístění skriptu
+- `MIN_ZOOM = 10`, `MAX_ZOOM = 16` — 16 je záměrné; 17–18 dramaticky zvětší
+  počet dlaždic a dobu renderování
 
-Zkontroluj soubor:
+## OsmAnd parametry
 
-output\S57_layers_report.txt
+- `ellipsoid = 0`
+- `inverted_y = 0`
+- `tilenumbering = ''` (normální sférický Web Mercator XYZ)
+- `tilesize = 256`
 
-Ten ukáže vrstvy, které GDAL v jednotlivých *.000 buňkách skutečně vidí.
+## Řešení problémů
 
-## Omezení
+Skončí-li skript na GDAL/S-57 chybě, zkontrolujte `output/S57_layers_report.txt` —
+ukazuje vrstvy, které GDAL v jednotlivých `*.000` buňkách skutečně vidí.
 
-Výsledek je vizualizační rastrový overlay pro OsmAnd. Nenahrazuje Inland
-ECDIS a neměl by být používán jako jediný navigační prostředek.
+## Licence
+
+Kód je licencován pod [MIT](LICENSE). Mapová data S-57/IENC podléhají
+podmínkám jejich původních poskytovatelů.

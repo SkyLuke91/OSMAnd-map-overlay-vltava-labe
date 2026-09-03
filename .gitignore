@@ -1,0 +1,8 @@
+# SQLite journals / temp files
+*.sqlitedb-journal
+*-journal
+*.tmp
+
+# OS
+Thumbs.db
+Desktop.ini
